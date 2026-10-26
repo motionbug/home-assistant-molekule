@@ -35,8 +35,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     
     fans = []
-    await coordinator.async_config_entry_first_refresh()
-
     if not coordinator.data or "content" not in coordinator.data:
         _LOGGER.error("No data received from the Molekule API")
         return

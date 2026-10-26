@@ -1,15 +1,14 @@
 from __future__ import annotations
+import asyncio
 import logging
 from datetime import timedelta
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.const import CONF_MODEL
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .const import DOMAIN, MANUFACTURER, CONF_EMAIL, CONF_PASSWORD, CONF_REFRESH_RATE, CONF_REFRESH_RATE_DEFAULT
-from .api import MolekuleApi
+from .api import AuthenticationError, MolekuleApi
 
 PLATFORMS: list[str] = ["fan", "sensor"]
 _LOGGER = logging.getLogger(__name__)
@@ -23,6 +22,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     try:
         await api.authenticate()
+    except AuthenticationError as err:
+        await api.close()
+        raise ConfigEntryAuthFailed from err
+    except asyncio.CancelledError:
+        await api.close()
+        raise
     except Exception as err:
         await api.close()
         raise ConfigEntryNotReady from err
@@ -88,6 +93,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             
             return processed_data
 
+        except AuthenticationError as err:
+            raise ConfigEntryAuthFailed from err
         except asyncio.CancelledError:
             raise
         except Exception as err:
@@ -97,22 +104,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
+        config_entry=entry,
         name="molekule_devices",
         update_method=async_update_data,
-        update_interval=timedelta(seconds=entry.options.get(CONF_REFRESH_RATE, CONF_REFRESH_RATE_DEFAULT)),
+        update_interval=timedelta(seconds=entry.options.get(
+            CONF_REFRESH_RATE, entry.options.get("sync_interval", CONF_REFRESH_RATE_DEFAULT)
+        )),
     )
 
     # Fetch initial data so we have data when entities subscribe
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except (Exception, asyncio.CancelledError):
+        await api.close()
+        raise
 
     hass.data[DOMAIN][entry.entry_id] = {
         "api": api,
         "coordinator": coordinator,
     }
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    entry.async_on_unload(entry.add_update_listener(update_listener))
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except (Exception, asyncio.CancelledError):
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        await api.close()
+        raise
 
     return True
 
@@ -124,7 +141,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await api.close()
 
     return unload_ok
-
-async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Update listener."""
-    await hass.config_entries.async_reload(entry.entry_id)

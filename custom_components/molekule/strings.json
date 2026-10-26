@@ -4,23 +4,40 @@
             "user": {
                 "data": {
                     "email": "Email",
-                    "password": "Password",
-                    "aqi_separate": "Separate AQI sensor",
-                    "silent_auto": "Silent auto mode"
+                    "password": "Password"
                 },
                 "description": "Enter your Molekule account credentials.",
                 "title": "Molekule"
+            },
+            "reauth_confirm": {
+                "title": "Reauthenticate Molekule",
+                "description": "Enter the current password for your configured Molekule account.",
+                "data": {
+                    "password": "Password"
+                }
             }
         },
         "error": {
             "force_change_password": "You need to change your password before continuing. Please log in to your Molekule account and follow the instructions to change your password.",
             "invalid_auth": "Invalid authentication. Please check your email and password.",
-            "cannot_connect": "Failed to connect to device",
+            "cannot_connect": "Unable to connect to the Molekule cloud. Please try again later.",
             "unknown": "An unexpected error occurred. Please try again later or check the logs for more information."
         },
         "abort": {
             "already_configured": "This Molekule account is already configured.",
             "reauth_successful": "Account configuration has been updated"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Molekule options",
+                "data": {
+                    "conf_refresh_rate": "Polling interval (seconds)",
+                    "conf_silent_auto": "Quiet automatic mode"
+                },
+                "description": "Set how often devices are polled and whether automatic mode should be quiet."
+            }
         }
     }
 }

@@ -1,7 +1,9 @@
 import aiohttp
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from warrant import Cognito
+from pycognito import Cognito
+from pycognito.exceptions import ForceChangePasswordException, MFAChallengeException
+from botocore.exceptions import ClientError
 from .const import API_CLIENT_ID, API_POOL_ID, API_URL, API_REGION
 import logging
 import time
@@ -76,24 +78,29 @@ class MolekuleApi:
                 self.token = self.cognito.id_token
                 self.token_expiration = datetime.now() + timedelta(hours=1)
                 _LOGGER.debug("Successfully authenticated with Molekule API")
+            except ClientError as err:
+                if err.response["Error"]["Code"] in {
+                    "NotAuthorizedException", "UserNotFoundException",
+                    "PasswordResetRequiredException", "UserNotConfirmedException",
+                }:
+                    raise AuthenticationError("Molekule credentials were rejected") from err
+                raise ApiConnectionError("Unable to contact Cognito") from err
+            except (ForceChangePasswordException, MFAChallengeException) as err:
+                raise AuthenticationError("Molekule account requires attention") from err
             except Exception as err:
-                _LOGGER.error("Authentication failed: %s", str(err))
-                raise AuthenticationError(f"Failed to authenticate: {err}") from err
+                raise ApiConnectionError("Unable to authenticate with Cognito") from err
 
     def _create_and_authenticate_cognito(self) -> Cognito:
         """Create and authenticate Cognito client in executor."""
-        try:
-            cognito = Cognito(
-                API_POOL_ID,
-                API_CLIENT_ID,
-                username=self.email,
-                user_pool_region=API_REGION
-            )
-            cognito.authenticate(password=self.password)
-            return cognito
-        except Exception as err:
-            _LOGGER.error("Cognito authentication failed: %s", str(err))
-            raise
+        cognito = Cognito(
+            API_POOL_ID,
+            API_CLIENT_ID,
+            username=self.email,
+            user_pool_region=API_REGION
+        )
+        # Authentication exceptions may contain challenge tokens; do not log them.
+        cognito.authenticate(password=self.password)
+        return cognito
 
     async def refresh_token(self) -> None:
         """Refresh the authentication token."""
@@ -106,9 +113,11 @@ class MolekuleApi:
                 self.token = self.cognito.id_token
                 self.token_expiration = datetime.now() + timedelta(hours=1)
                 _LOGGER.debug("Successfully refreshed Molekule API token")
+                return
             except Exception as err:
                 _LOGGER.warning("Token refresh failed, re-authenticating: %s", str(err))
-                await self.authenticate()
+        # authenticate() takes the same lock; release it before falling back.
+        await self.authenticate()
 
     async def ensure_token_valid(self) -> None:
         """Ensure the authentication token is valid."""
@@ -153,7 +162,7 @@ class MolekuleApi:
                             attempt + 1, self._retry_attempts, str(err))
                 if attempt + 1 < self._retry_attempts:
                     await asyncio.sleep(self._retry_delay * (attempt + 1))
-                    await self.close()  # Force session recreation
+                    await self._close_session()  # Keep Cognito executor alive for retries
                     client_session = await self.session
                 else:
                     raise ApiConnectionError(f"Failed after {self._retry_attempts} attempts: {err}")
@@ -165,6 +174,8 @@ class MolekuleApi:
         try:
             data = await self._make_request("GET", API_URL)
             return clean_none_values(data) if data else None
+        except AuthenticationError:
+            raise
         except Exception as err:
             _LOGGER.error("Failed to get devices: %s", str(err))
             return None
@@ -271,12 +282,15 @@ class MolekuleApi:
             _LOGGER.error("Failed to get AQI: %s", str(err))
             return None
 
-    async def close(self) -> None:
-        """Close all connections."""
+    async def _close_session(self) -> None:
+        """Close the HTTP session without shutting down authentication."""
         async with self._session_lock:
             if self._session and not self._session.closed:
                 await self._session.close()
                 self._session = None
-        
+
+    async def close(self) -> None:
+        """Release HTTP and authentication resources when the client is finished."""
+        await self._close_session()
         if self.executor:
             self.executor.shutdown(wait=False)
